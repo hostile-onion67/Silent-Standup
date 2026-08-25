@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "1541773409300512808": {
+      "channel_id": null,
+      "repositories": [],
+      "github_users": [
+        "hostile-onion67"
+      ],
+      "post_time": "09:00",
+      "timezone": "UTC",
+      "lookback_hours": 24,
+      "llm_rewrite": false
+    }
+  }
+}
