@@ -1,68 +1,70 @@
-"""Format GitHub activity for Discord, with an optional Groq rewrite."""
+"""
+utils/formatter.py
+Turns raw GitHub activity dicts into readable standup text.
+"""
 
-import asyncio
 from datetime import datetime
-from typing import Any
-
-import pytz
 
 
-def format_standup(
-    activity: dict[str, list[dict[str, Any]]],
-    username: str,
-    timezone_name: str = "UTC",
-    lookback_hours: int = 24,
-) -> str:
-    """Turn raw GitHub event data into a concise Discord standup."""
-    date = datetime.now(pytz.timezone(timezone_name)).strftime("%Y-%m-%d")
-    lines = [f"📋 **Standup for {username} — {date}**\n"]
+def format_standup(activity: dict, username: str, streak: int = None) -> str:
+    """Turn raw activity dict into readable standup text (Discord-friendly)."""
+    lines = [f"📋 **Standup for {username}** — {datetime.now().strftime('%Y-%m-%d')}\n"]
+
+    if streak is not None and streak > 1:
+        lines.append(f"🔥 {streak}-day commit streak!\n")
+
     if not any(activity.values()):
-        lines.append(f"No GitHub activity in the last {lookback_hours}h. Quiet day 🌙")
+        lines.append("No GitHub activity in the last 24h. Quiet day 🌙")
         return "\n".join(lines)
 
-    sections = (
-        ("commits", "🔨 Commits", lambda item: f"• **{item['repo']}** — {item['message']} (`{item['sha']}`)"),
-        ("prs_opened", "📬 PRs opened", lambda item: pull_request_line(item)),
-        ("prs_merged", "✅ PRs merged", lambda item: pull_request_line(item)),
-        ("reviews", "👀 Reviews given", lambda item: pull_request_line(item)),
-    )
-    for key, label, render in sections:
-        items = activity[key]
-        if items:
-            lines.append(f"{label} ({len(items)}):")
-            lines.extend(render(item) for item in items)
-            lines.append("")
-    return "\n".join(lines).rstrip()
+
+    if activity["commits"]:
+        lines.append(f"🔨 **Commits** ({len(activity['commits'])}):")
+        for c in activity["commits"]:
+            lines.append(f"  • [{c['repo']}] {c['message']} (`{c['sha']}`)")
+        lines.append("")
+
+    if activity["prs_opened"]:
+        lines.append(f"📬 **PRs opened** ({len(activity['prs_opened'])}):")
+        for pr in activity["prs_opened"]:
+            lines.append(f"  • [{pr['repo']}] #{pr['number']}: {pr['title']}")
+        lines.append("")
+
+    if activity["prs_merged"]:
+        lines.append(f"✅ **PRs merged** ({len(activity['prs_merged'])}):")
+        for pr in activity["prs_merged"]:
+            lines.append(f"  • [{pr['repo']}] #{pr['number']}: {pr['title']}")
+        lines.append("")
+
+    if activity["reviews"]:
+        lines.append(f"👀 **Reviews given** ({len(activity['reviews'])}):")
+        for r in activity["reviews"]:
+            lines.append(f"  • [{r['repo']}] #{r['number']}: {r['title']}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
-def pull_request_line(item: dict[str, Any]) -> str:
-    title = f"[#{item['number']}: {item['title']}]({item['url']})" if item.get("url") else f"#{item['number']}: {item['title']}"
-    return f"• **{item['repo']}** — {title}"
+def format_weekly_digest(activity: dict, username: str) -> str:
+    """Turn a week's worth of raw activity into a digest summary."""
+    lines = [f"📅 **Weekly digest for {username}**\n"]
 
+    if not any(activity.values()):
+        lines.append("No GitHub activity in the last 7 days. 🌙")
+        return "\n".join(lines)
 
-async def rewrite_standup(report: str, api_key: str | None) -> str:
-    """Optionally make a report more natural; fall back safely to raw output."""
-    if not api_key:
-        return report
-    return await asyncio.to_thread(_rewrite_standup_sync, report, api_key)
+    lines.append(f"🔨 {len(activity['commits'])} commits")
+    lines.append(f"📬 {len(activity['prs_opened'])} PRs opened")
+    lines.append(f"✅ {len(activity['prs_merged'])} PRs merged")
+    lines.append(f"👀 {len(activity['reviews'])} reviews given\n")
 
+    repos_touched = set()
+    for c in activity["commits"]:
+        repos_touched.add(c["repo"])
+    for pr in activity["prs_opened"] + activity["prs_merged"]:
+        repos_touched.add(pr["repo"])
 
-def _rewrite_standup_sync(report: str, api_key: str) -> str:
-    try:
-        from groq import Groq
+    if repos_touched:
+        lines.append(f"📂 Repos touched: {', '.join(sorted(repos_touched))}")
 
-        completion = Groq(api_key=api_key).chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            temperature=0.2,
-            max_completion_tokens=600,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Rewrite GitHub standup reports into concise, professional Discord Markdown. Do not invent, omit, or alter facts, repositories, PR numbers, links, or commit SHAs. Keep headings and bullet points.",
-                },
-                {"role": "user", "content": report},
-            ],
-        )
-        return completion.choices[0].message.content or report
-    except Exception:
-        return report
+    return "\n".join(lines)

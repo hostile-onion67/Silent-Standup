@@ -1,97 +1,87 @@
-import logging
-import os
-from pathlib import Path
+"""
+bot.py
+Entry point for the Silent Standup Discord bot.
 
+Commands:
+  !standup            -> posts your GitHub standup for the last 24h, with streak count
+  !weeksummary        -> posts a digest of the last 7 days of GitHub activity
+"""
+
+import os
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from github import Github
 
-from discord_bot.commands import StandupService, register_commands
-from discord_bot.scheduler import DailyStandupScheduler
-from utils.config import ConfigStore
+from gh_activity.activity import get_recent_activity
+from utils.formatter import format_standup, format_weekly_digest
+from utils.streaks import update_streak
 
-BASE_DIR = Path(__file__).resolve().parent
+load_dotenv()
 
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_USERNAME = os.getenv("GITHUB_USERNAME")
 
-class SilentStandupBot(commands.Bot):
-    def __init__(self, config_store: ConfigStore, github_token: str) -> None:
-        intents = discord.Intents.default()
-        intents.message_content = True  # Required only for the !standup command.
-        super().__init__(command_prefix="!", intents=intents)
-
-        self.config_store = config_store
-        self.standup_service = StandupService(config_store, github_token)
-        self.scheduler = DailyStandupScheduler(config_store, self.post_scheduled_standup)
-
-    async def setup_hook(self) -> None:
-        register_commands(self, self.standup_service, self.config_store, self.scheduler)
-        self.scheduler.start()
-        await self.scheduler.sync_jobs()
-        await self.tree.sync()
-        logging.info("Slash commands synced and daily standup scheduler started.")
-
-    async def post_scheduled_standup(self, guild_id: int) -> None:
-        """Generate and post a configured guild's standup from the scheduler."""
-        settings = self.config_store.get_guild(guild_id)
-        channel_id = settings.get("channel_id")
-        if not channel_id:
-            logging.warning("Guild %s has no standup channel configured.", guild_id)
-            return
-
-        channel = self.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await self.fetch_channel(channel_id)
-            except discord.DiscordException:
-                logging.exception("Could not find configured channel %s.", channel_id)
-                return
-
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            logging.warning("Configured channel %s is not a text channel.", channel_id)
-            return
-
-        try:
-            standup = await self.standup_service.generate(guild_id)
-            for message in split_discord_messages(standup):
-                await channel.send(message)
-        except Exception:
-            logging.exception("Scheduled standup failed for guild %s.", guild_id)
-
-
-def split_discord_messages(text: str, limit: int = 2_000) -> list[str]:
-    """Split long reports at line boundaries so they fit Discord's message limit."""
-    if len(text) <= limit:
-        return [text]
-
-    chunks: list[str] = []
-    current = ""
-    for line in text.splitlines(keepends=True):
-        if len(current) + len(line) > limit and current:
-            chunks.append(current.rstrip())
-            current = ""
-        while len(line) > limit:
-            chunks.append(line[:limit])
-            line = line[limit:]
-        current += line
-    if current:
-        chunks.append(current.rstrip())
-    return chunks
-
-
-def main() -> None:
-    load_dotenv(BASE_DIR / ".env")
-    discord_token = os.getenv("DISCORD_TOKEN")
-    github_token = os.getenv("GITHUB_TOKEN")
-    if not discord_token or not github_token:
-        raise SystemExit("Missing DISCORD_TOKEN or GITHUB_TOKEN. Add them to .env first.")
-
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+if not DISCORD_TOKEN or not GITHUB_TOKEN or not GITHUB_USERNAME:
+    raise SystemExit(
+        "Missing DISCORD_TOKEN, GITHUB_TOKEN, or GITHUB_USERNAME in .env"
     )
-    bot = SilentStandupBot(ConfigStore(BASE_DIR / "config.json"), github_token)
-    bot.run(discord_token, log_handler=None)
+
+# Discord requires explicit intents for reading message content (for prefix commands)
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+gh_client = Github(GITHUB_TOKEN)
+
+
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user} (id: {bot.user.id})")
+
+
+@bot.command(name="standup")
+async def standup(ctx: commands.Context):
+    """Fetch and post the last 24h of GitHub activity."""
+    await ctx.send("Pulling your GitHub activity... 🔍")
+
+    try:
+        activity = get_recent_activity(gh_client, GITHUB_USERNAME, hours=24)
+        had_activity = any(activity.values())
+        streak = update_streak(GITHUB_USERNAME, had_activity)
+        standup_text = format_standup(activity, GITHUB_USERNAME, streak=streak)
+    except Exception as e:
+        await ctx.send(f"⚠️ Couldn't fetch activity: {e}")
+        return
+
+    # Discord messages cap at 2000 chars — split if needed
+    if len(standup_text) <= 2000:
+        await ctx.send(standup_text)
+    else:
+        for i in range(0, len(standup_text), 2000):
+            await ctx.send(standup_text[i:i + 2000])
+
+
+@bot.command(name="weeksummary")
+async def weeksummary(ctx: commands.Context):
+    """Fetch and post the last 7 days of GitHub activity as a digest."""
+    await ctx.send("Pulling your week's GitHub activity... 🔍")
+
+    try:
+        activity = get_recent_activity(gh_client, GITHUB_USERNAME, hours=24 * 7)
+        digest_text = format_weekly_digest(activity, GITHUB_USERNAME)
+    except Exception as e:
+        await ctx.send(f"⚠️ Couldn't fetch activity: {e}")
+        return
+
+    if len(digest_text) <= 2000:
+        await ctx.send(digest_text)
+    else:
+        for i in range(0, len(digest_text), 2000):
+            await ctx.send(digest_text[i:i + 2000])
 
 
 if __name__ == "__main__":
-    main()
+    bot.run(DISCORD_TOKEN)
